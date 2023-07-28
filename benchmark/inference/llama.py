@@ -82,7 +82,7 @@ def run(args, model, mode, **kwargs):
     from tqdm import tqdm
     import timeit
     time_per_iter = []
-    with torch.no_grad():
+    with torch.inference_mode():
         for _ in tqdm(range(args.iters)):
             start = timeit.default_timer()
             model.forward(**kwargs)

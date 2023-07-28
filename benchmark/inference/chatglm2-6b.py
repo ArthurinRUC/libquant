@@ -1,6 +1,6 @@
 import torch
 import argparse
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
 from peft import PeftModel
 
 
@@ -9,15 +9,40 @@ GROUPS = 2
 KV_CHANNELS = 128
 
 
+import os
+import subprocess
+
+DEVICE = os.environ.get("CUDA_VISIBLE_DEVICES")
+CLOCK_SPEED = 1350 # Must choose a clock speed that's supported on your device.
+
+def set_clock_speed():
+    """
+    Set GPU clock speed to a specific value.
+    This doesn't guarantee a fixed value due to throttling, but can help reduce variance.
+    """
+    process = subprocess.Popen("nvidia-smi", stdout=subprocess.PIPE, shell=True)
+    stdout, _ = process.communicate()
+    process = subprocess.run(f"sudo nvidia-smi -pm ENABLED -i {DEVICE}",      shell=True)
+    process = subprocess.run(f"sudo nvidia-smi -lgc {CLOCK_SPEED} -i {DEVICE}", shell=True)
+
+def reset_clock_speed():
+    """
+    Reset GPU clock speed to default values.
+    """
+    subprocess.run(f"sudo nvidia-smi -pm ENABLED -i {DEVICE}", shell=True)
+    subprocess.run(f"sudo nvidia-smi -rgc -i {DEVICE}", shell=True)
+
+
 def getargs():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_dir", type=str, help="pretrained model dir")
     parser.add_argument("--peft_dir", type=str, help="peft(e.g. LoRA) model dir")
-    parser.add_argument("--bits", type=int, default=16) 
+    parser.add_argument("--bits", type=int, default=16)
     parser.add_argument("--mode", choices=["prefill", "decode", "all"], default="all")
+    parser.add_argument("--debug", action="store_true")
     parser.add_argument("--iters", type=int, default=500)
-    parser.add_argument("--prefill_len", type=int, default=50)
-    parser.add_argument("--decode_kv_len", type=int, default=50)
+    parser.add_argument("--prefill_len", type=int, default=100)
+    parser.add_argument("--decode_kv_len", type=int, default=100)
     args = parser.parse_args()
     return args
 
@@ -25,10 +50,18 @@ def getargs():
 def setup(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model_dir, trust_remote_code=True)
     
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True if args.bits == 4 else None,
+        load_in_8bit=True if args.bits == 8 else None,
+        # bnb_4bit_use_double_quant=True if args.bits == 4 else None,
+        bnb_4bit_quant_type="fp4" if args.bits == 4 else "",
+        bnb_4bit_compute_dtype=torch.float16 if args.bits == 4 else None
+    )
+    
     if args.bits == 4:
-        model = AutoModel.from_pretrained(args.model_dir, load_in_4bit=True, trust_remote_code=True)
+        model = AutoModel.from_pretrained(args.model_dir, quantization_config=bnb_config, trust_remote_code=True)
     elif args.bits == 8:
-        model = AutoModel.from_pretrained(args.model_dir, load_in_8bit=True, trust_remote_code=True).cuda()
+        model = AutoModel.from_pretrained(args.model_dir, quantization_config=bnb_config, trust_remote_code=True).cuda()
     else:
         model = AutoModel.from_pretrained(args.model_dir, trust_remote_code=True).half().cuda()
 
@@ -36,7 +69,7 @@ def setup(args):
         model = PeftModel.from_pretrained(model, args.peft_dir)
 
     model = model.eval()
-        
+
     return model, tokenizer
 
 
@@ -56,7 +89,7 @@ def fakedata(args, tokenizer, mode="prefill", prompt=None):
     """
 
     inputs = tokenizer(prompt, return_tensors="pt")
-    # print(inputs)
+
     if mode == "prefill":
         input_ids = inputs.input_ids[:, :args.prefill_len].cuda()
         position_ids = inputs.position_ids[:, :args.prefill_len].cuda()
@@ -78,16 +111,53 @@ def fakedata(args, tokenizer, mode="prefill", prompt=None):
     }
 
 
-def run(args, model, mode, **kwargs):
+def run(args, model, mode, warmup=5, **kwargs):
     from tqdm import tqdm
     import timeit
+    
     time_per_iter = []
-    with torch.no_grad():
-        for _ in tqdm(range(args.iters)):
+    
+    # allocating 40MB to match L2 cache size on A100
+    x = torch.empty(int(40 * (1024 ** 2)), dtype=torch.int8, device='cuda')
+
+    def flush_cache():
+        x.zero_()
+    
+    # set_clock_speed()
+    
+    with torch.inference_mode():
+        for i in tqdm(range(args.iters + warmup)):
+            flush_cache()
+ 
             start = timeit.default_timer()
             model.forward(**kwargs)
+            torch.cuda.synchronize()
             end = timeit.default_timer()
-            time_per_iter.append(end - start)
+            
+            if i >= warmup:
+                time_per_iter.append(end - start)
+
+        if args.debug:
+            from torch.profiler import profile, record_function, ProfilerActivity
+            with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=False) as prof:
+                with record_function("model_inference"):
+                    model.forward(**kwargs)
+            
+            prof.export_chrome_trace(f"chatglm2-6b-{mode}-{args.bits}bits-trace.json")
+            
+            print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+            
+            # tensorboard
+            with torch.profiler.profile(
+                    schedule=torch.profiler.schedule(wait=1, warmup=1, active=3, repeat=1),
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./log/chatglm2-6b-{mode}-{args.bits}bits-trace'),
+                    record_shapes=False,
+                    profile_memory=False,
+                    with_stack=True
+            ) as prof:
+                for _ in range(5):
+                    model.forward(**kwargs)
+                    prof.step()
         
         mean_per_iter = sum(time_per_iter) / args.iters
         # calculate speed
@@ -99,7 +169,7 @@ def run(args, model, mode, **kwargs):
             print(f"decode speed: {token_per_second:.6f} token/s")
             print(f"decode latency per token: {mean_per_iter*1e3:.6f} ms")
             
-
+        # reset_clock_speed()
 
 def main():
     args = getargs()
@@ -113,4 +183,6 @@ def main():
         data = fakedata(args, tokenizer, mode="decode")
         run(args, model, mode="decode", **data)
 
-main()
+
+if __name__ == "__main__":
+    main()
