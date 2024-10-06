@@ -46,7 +46,6 @@ class PretrainDataset(Dataset):
 @torch.inference_mode()
 def test_ppl_alpaca():
     model_path = "/home/arthur/Meta-Llama-3-8B/"
-    # model_path = "/mnt/d/linuxdata/HuggingFace/Qwen2-7B-Instruct/"
     data_dir = "/mnt/d/linuxdata/HuggingFace/datasets/val"
     device = "cuda"
     batch_size = 1

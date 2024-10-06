@@ -61,21 +61,21 @@ def quant_rtn(
     if use_zero_point:
         # asymmetric quantization
         qmin, qmax = 0, 2**nbits - 1
-        xmin, xmax = torch.min(mat, dim=1).values, torch.max(mat, dim=1).values
-        scale = (xmax - xmin).clamp(min=1e-5).div(qmax).to(scale_dtype).to(device)
-        zero_point = (-xmin / scale).to(zero_dtype).to(device)
+        xmin, xmax = mat.amin(1), mat.amax(1)
+        scale = (xmax - xmin).clamp(min=1e-5).div(qmax).to(scale_dtype)
+        zero_point = (-xmin / scale).to(zero_dtype)
         if not per_tensor:
             scale.unsqueeze_(1)
             zero_point.unsqueeze_(1)
-        x = mat.div(scale).add(zero_point).round().clamp(qmin, qmax).to(quant_dtype).to(device)
+        x = mat.div(scale).add(zero_point).round().clamp(qmin, qmax).to(quant_dtype)
     else:
         # symmetric quantization
         qmin, qmax = -(2 ** (nbits - 1)), 2 ** (nbits - 1) - 1
-        xabsmax = torch.max(torch.abs(mat), dim=1).values
-        scale = xabsmax.clamp(min=1e-5).div(qmax).to(scale_dtype).to(device)
+        xabsmax = mat.abs().amax(1)
+        scale = xabsmax.clamp(min=1e-5).div(qmax).to(scale_dtype)
         if not per_tensor:
             scale.unsqueeze_(1)
-        x = mat.div(scale).round().clamp(qmin, qmax).to(quant_dtype).to(device)
+        x = mat.div(scale).round().clamp(qmin, qmax).to(quant_dtype)
 
     x = x.reshape(-1, quant_dim_length)
 

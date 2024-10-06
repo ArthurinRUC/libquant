@@ -58,9 +58,10 @@ class QuantLinear(nn.Module):
         )
 
         qweight, scale, zero_point = output["quant_tensor"], output["scale"], output.get("zero_point", None)
-        if quant_args.device:
-            module.bias.to(quant_args.device)
-        quant_module = cls(quant_args, qweight, scale, zero_point, module.bias)
+        bias = module.bias
+        if bias is not None and quant_args.device:
+            bias = bias.to(quant_args.device)
+        quant_module = cls(quant_args, qweight, scale, zero_point, bias)
         return quant_module
 
     def forward(self, x):
