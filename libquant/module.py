@@ -3,12 +3,14 @@ import torch.nn.functional as F
 from torch import nn
 
 from .arguments import QuantArgs
+from .quant_awq import quant_awq
 from .quant_rtn import dequant_rtn, quant_rtn
+from .quant_smoothquant import quant_smoothquant
 
 
 LINEAR_MODULES = [nn.Linear]
-QUANT_FUNCTIONS = {"rtn": quant_rtn}
-DEQUANT_FUNCTIONS = {"rtn": dequant_rtn}
+QUANT_FUNCTIONS = {"rtn": quant_rtn, "awq": quant_awq, "smoothquant": quant_smoothquant}
+DEQUANT_FUNCTIONS = {"rtn": dequant_rtn, "awq": dequant_rtn, "smoothquant": dequant_rtn}
 
 
 def substitute_module(model, quant_args):
