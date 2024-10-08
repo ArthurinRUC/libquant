@@ -43,7 +43,7 @@ class QuantLinear(nn.Module):
         self.dequant_fn = DEQUANT_FUNCTIONS[self.args.method]
 
     @classmethod
-    def from_linear(cls: "QuantLinear", module: nn.Module, quant_args: QuantArgs):
+    def from_linear(cls: "QuantLinear", module: nn.Module, quant_args: QuantArgs, **kwargs):
         quant_fn = QUANT_FUNCTIONS[quant_args.method]
         output = quant_fn(
             module.weight,
@@ -57,6 +57,7 @@ class QuantLinear(nn.Module):
             device=quant_args.device,
             use_zero_point=quant_args.use_zero_point,
             is_linear_weight=True,
+            **kwargs,
         )
 
         qweight, scale, zero_point = output["quant_tensor"], output["scale"], output.get("zero_point", None)

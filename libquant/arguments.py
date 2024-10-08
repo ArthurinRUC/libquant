@@ -47,6 +47,9 @@ class QuantArgs:
     calib_nsamples: int = 128
     calib_maxlen: int = 512
 
+    # AWQ/Smoothquant arguments
+    use_bidirectional_scale: bool = False
+
     def __post_init__(self):
         if self.nbits is None:
             raise ValueError("nbits must be specified")
