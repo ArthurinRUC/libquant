@@ -20,7 +20,6 @@ class QuantArgs:
     act_quant: bool = False
     training: bool = False
     device: torch.device = None
-    is_linear_weight: bool = False
 
     # weight quantization arguments
     nbits: int = None
@@ -43,13 +42,24 @@ class QuantArgs:
     act_use_zero_point: bool = False
 
     # calibration arguments
+    do_calibration: bool = None
     calib_dataset: str = None
+    calib_batch_size: int = 1
     calib_nsamples: int = 128
     calib_maxlen: int = 512
+    calib_text_column: str = "text"
+    calib_data_shuffle: bool = False
+    tokenizer_path: str = None
 
     # AWQ/Smoothquant arguments
     use_bidirectional_scale: bool = False
+    smooth_alpha: float = 0.5
 
     def __post_init__(self):
         if self.nbits is None:
             raise ValueError("nbits must be specified")
+
+        self.method = self.method.lower()
+
+        if self.do_calibration is None and self.method in ["smoothquant", "awq"]:
+            self.do_calibration = True

@@ -3,12 +3,12 @@ import torch.nn.functional as F
 from torch import nn
 
 from .arguments import QuantArgs
+from .constants import REPLACE_LINEAR_MODULES
 from .quant_awq import quant_awq
 from .quant_rtn import dequant_rtn, quant_rtn
 from .quant_smoothquant import quant_smoothquant
 
 
-LINEAR_MODULES = [nn.Linear]
 QUANT_FUNCTIONS = {"rtn": quant_rtn, "awq": quant_awq, "smoothquant": quant_smoothquant}
 DEQUANT_FUNCTIONS = {"rtn": dequant_rtn, "awq": dequant_rtn, "smoothquant": dequant_rtn}
 
@@ -19,7 +19,7 @@ def substitute_module(model, quant_args):
         model = model.module
 
     for name, module in model.named_children():
-        if type(module) in LINEAR_MODULES:
+        if isinstance(module, REPLACE_LINEAR_MODULES):
             model._modules[name] = substitute_linear(module, quant_args)
 
         if len(list(module.children())) > 0:
@@ -31,9 +31,19 @@ def substitute_linear(module, quant_args):
 
 
 class QuantLinear(nn.Module):
-    def __init__(self, quant_args, qweight, scale, zero_point=None, bias=None):
+    def __init__(
+        self,
+        quant_args: QuantArgs,
+        weight: torch.Tensor = None,
+        qweight: torch.Tensor = None,
+        scale: torch.Tensor = None,
+        zero_point: torch.Tensor = None,
+        bias: torch.Tensor = None,
+        **kwargs,
+    ):
         super().__init__()
         self.args = quant_args
+        self.register_buffer("weight", weight)
         self.register_buffer("qweight", qweight)
         self.register_buffer("bias", bias)
         self.register_buffer("scale", scale)
@@ -42,30 +52,43 @@ class QuantLinear(nn.Module):
         self.quant_fn = QUANT_FUNCTIONS[self.args.method]
         self.dequant_fn = DEQUANT_FUNCTIONS[self.args.method]
 
+        if self.args.do_calibration:
+            self.register_buffer("act_scale", None)
+            self.register_buffer("weight_scale", None)
+            self.register_buffer("smooth_scale", None)
+
     @classmethod
-    def from_linear(cls: "QuantLinear", module: nn.Module, quant_args: QuantArgs, **kwargs):
-        quant_fn = QUANT_FUNCTIONS[quant_args.method]
-        output = quant_fn(
-            module.weight,
-            nbits=quant_args.nbits,
-            group_size=quant_args.group_size,
-            per_tensor=quant_args.per_tensor,
-            per_channel=quant_args.per_channel,
-            quant_dtype=quant_args.quant_dtype,
-            scale_dtype=quant_args.scale_dtype,
-            zero_dtype=quant_args.zero_dtype,
-            device=quant_args.device,
-            use_zero_point=quant_args.use_zero_point,
+    def from_linear(cls: "QuantLinear", module: nn.Linear, quant_args: QuantArgs, **kwargs):
+        device = quant_args.device
+        weight, bias = module.weight, module.bias
+        if quant_args.device:
+            weight = weight.to(device)
+        if bias is not None and quant_args.device:
+            bias = bias.to(device)
+
+        return cls(quant_args, weight=weight, bias=bias, **kwargs)
+
+    def quant_weight(self, **kwargs):
+        output = self.quant_fn(
+            self.weight,
+            nbits=self.args.nbits,
+            group_size=self.args.group_size,
+            per_tensor=self.args.per_tensor,
+            per_channel=self.args.per_channel,
+            quant_dtype=self.args.quant_dtype,
+            scale_dtype=self.args.scale_dtype,
+            zero_dtype=self.args.zero_dtype,
+            device=self.args.device,
+            use_zero_point=self.args.use_zero_point,
             is_linear_weight=True,
             **kwargs,
         )
 
-        qweight, scale, zero_point = output["quant_tensor"], output["scale"], output.get("zero_point", None)
-        bias = module.bias
-        if bias is not None and quant_args.device:
-            bias = bias.to(quant_args.device)
-        quant_module = cls(quant_args, qweight, scale, zero_point, bias)
-        return quant_module
+        self.qweight = output["quant_tensor"]
+        self.scale = output["scale"]
+        self.zero_point = output.get("zero_point", None)
+
+        self.weight = None
 
     def forward(self, x):
         if self.args.training:
